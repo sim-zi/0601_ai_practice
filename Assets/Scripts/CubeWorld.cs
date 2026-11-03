@@ -9,122 +9,139 @@ public class CubeWorld : MonoBehaviour
     public class FaceData
     {
         public ViewDirection direction;
-        public RenderTexture paintTexture;
-        public Color brushColor;
         public Vector3 cameraPosition;
         public Vector3 cameraUp;
     }
 
     [Header("Settings")]
-    public float cubeSize = 5f;
-    public int textureResolution = 1024;
+    public Vector3 cubeDimensions = new Vector3(15f, 10f, 5f);
+    public Vector3Int gridResolution = new Vector3Int(30, 20, 10);
     public float transitionSpeed = 10f;
 
     [Header("State")]
     public ViewDirection currentView = ViewDirection.Front;
-    public bool isSculptMode = false;
+    public bool isSimulationMode = false;
 
-    [Header("References")]
-    public Material shellMaterial; // Used for the 6 paintable planes
-    public Material volumeMaterial; // Used for the raymarched volume
+    [Header("Voxel References")]
+    public GameObject voxelPrefab;
+    private GameObject voxelRoot;
 
-    private Dictionary<ViewDirection, FaceData> faces = new Dictionary<ViewDirection, FaceData>();
-    private GameObject shellRoot;
-    private GameObject volumeRoot;
+    [Header("Physics Grains")]
+    public GameObject grainPrefab;
+    public Transform grainSpawnPoint;
+    public float grainSpawnRate = 0.05f;
+    private float nextSpawnTime;
+    private List<GameObject> activeGrains = new List<GameObject>();
 
     void Start()
     {
-        InitializeFaces();
-        SetupShell();
-        SetupVolume();
+        isSimulationMode = false;
+        FullSetup();
+    }
+
+    public void FullSetup()
+    {
+        SetupVoxels();
         UpdateVisibility();
+    }
+
+    public void SetupVoxels()
+    {
+        foreach (Transform child in GetComponentsInChildren<Transform>(true))
+        {
+            if (child != null && child.name == "VoxelRoot")
+            {
+                if (Application.isPlaying) Destroy(child.gameObject);
+                else DestroyImmediate(child.gameObject);
+            }
+        }
+
+        voxelRoot = new GameObject("VoxelRoot");
+        voxelRoot.transform.SetParent(this.transform, false);
+
+        Vector3 voxelSize = new Vector3(
+            cubeDimensions.x / gridResolution.x,
+            cubeDimensions.y / gridResolution.y,
+            cubeDimensions.z / gridResolution.z
+        );
+        
+        Vector3 offset = cubeDimensions / 2f - voxelSize / 2f;
+
+        for (int x = 0; x < gridResolution.x; x++)
+        {
+            for (int y = 0; y < gridResolution.y; y++)
+            {
+                for (int z = 0; z < gridResolution.z; z++)
+                {
+                    Vector3 pos = new Vector3(x * voxelSize.x, y * voxelSize.y, z * voxelSize.z) - offset;
+                    GameObject v = Instantiate(voxelPrefab, voxelRoot.transform);
+                    v.name = "Voxel"; 
+                    v.transform.localPosition = pos;
+                    v.transform.localScale = voxelSize * 0.99f;
+                }
+            }
+        }
+    }
+
+    public void TryRemoveVoxel(Ray ray, float brushSize)
+    {
+        if (Physics.Raycast(ray, out RaycastHit hit, 100f))
+        {
+            Collider[] hits = Physics.OverlapSphere(hit.point, brushSize);
+            foreach (var h in hits)
+            {
+                GameObject go = h.gameObject;
+                if (go.name == "Voxel" || (go.transform.parent != null && go.transform.parent.name == "VoxelRoot"))
+                {
+                    go.SetActive(false);
+                    if (Application.isPlaying) Destroy(go);
+                    else DestroyImmediate(go);
+                }
+            }
+        }
     }
 
     void Update()
     {
         HandleInput();
         UpdateCamera();
+        HandleGrainEmission();
     }
 
-    void InitializeFaces()
+    void HandleGrainEmission()
     {
-        faces[ViewDirection.Front] = new FaceData { direction = ViewDirection.Front, brushColor = Color.red, cameraPosition = new Vector3(0, 0, -8), cameraUp = Vector3.up };
-        faces[ViewDirection.Back] = new FaceData { direction = ViewDirection.Back, brushColor = Color.red, cameraPosition = new Vector3(0, 0, 8), cameraUp = Vector3.up };
-        faces[ViewDirection.Left] = new FaceData { direction = ViewDirection.Left, brushColor = Color.green, cameraPosition = new Vector3(-8, 0, 0), cameraUp = Vector3.up };
-        faces[ViewDirection.Right] = new FaceData { direction = ViewDirection.Right, brushColor = Color.green, cameraPosition = new Vector3(8, 0, 0), cameraUp = Vector3.up };
-        faces[ViewDirection.Top] = new FaceData { direction = ViewDirection.Top, brushColor = Color.blue, cameraPosition = new Vector3(0, 8, 0), cameraUp = Vector3.forward };
-        faces[ViewDirection.Bottom] = new FaceData { direction = ViewDirection.Bottom, brushColor = Color.blue, cameraPosition = new Vector3(0, -8, 0), cameraUp = Vector3.back };
-
-        foreach (var face in faces.Values)
+        if (isSimulationMode && grainPrefab != null && grainSpawnPoint != null)
         {
-            face.paintTexture = new RenderTexture(textureResolution, textureResolution, 0, RenderTextureFormat.ARGB32);
-            face.paintTexture.Create();
-            ClearRT(face.paintTexture);
+            if (Time.time >= nextSpawnTime)
+            {
+                SpawnGrain();
+                nextSpawnTime = Time.time + grainSpawnRate;
+            }
         }
     }
 
-    void SetupShell()
+    void SpawnGrain()
     {
-        shellRoot = new GameObject("Shell");
-        shellRoot.transform.SetParent(this.transform, false);
-
-        // Primitive Quads face -Z by default.
-        // Front: View from (0,0,-8). Plane at (0,0,-2.5). Face -Z.
-        CreatePlane(ViewDirection.Front, new Vector3(0, 0, -cubeSize/2), Quaternion.identity);
-        // Back: View from (0,0,8). Plane at (0,0,2.5). Face +Z.
-        CreatePlane(ViewDirection.Back, new Vector3(0, 0, cubeSize/2), Quaternion.Euler(0, 180, 0));
-        // Left: View from (-8,0,0). Plane at (-2.5,0,0). Face -X.
-        CreatePlane(ViewDirection.Left, new Vector3(-cubeSize/2, 0, 0), Quaternion.Euler(0, 90, 0));
-        // Right: View from (8,0,0). Plane at (2.5,0,0). Face +X.
-        CreatePlane(ViewDirection.Right, new Vector3(cubeSize/2, 0, 0), Quaternion.Euler(0, -90, 0));
-        // Top: View from (0,8,0). Plane at (0,2.5,0). Face +Y.
-        CreatePlane(ViewDirection.Top, new Vector3(0, cubeSize/2, 0), Quaternion.Euler(90, 0, 0));
-        // Bottom: View from (0,-8,0). Plane at (0,-2.5,0). Face -Y.
-        CreatePlane(ViewDirection.Bottom, new Vector3(0, -cubeSize/2, 0), Quaternion.Euler(-90, 0, 0));
-    }
-
-    void CreatePlane(ViewDirection dir, Vector3 pos, Quaternion rot)
-    {
-        GameObject go = GameObject.CreatePrimitive(PrimitiveType.Quad);
-        go.name = "Plane_" + dir;
-        go.transform.SetParent(shellRoot.transform, false);
-        go.transform.localPosition = pos;
-        go.transform.localRotation = rot;
-        go.transform.localScale = Vector3.one * cubeSize;
-
-        Material mat = new Material(shellMaterial);
-        mat.mainTexture = faces[dir].paintTexture;
-        go.GetComponent<MeshRenderer>().sharedMaterial = mat;
-    }
-
-    void SetupVolume()
-    {
-        volumeRoot = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        volumeRoot.name = "VolumeSculpt";
-        volumeRoot.transform.SetParent(this.transform, false);
-        volumeRoot.transform.localScale = Vector3.one * (cubeSize + 0.1f);
-        
-        Material mat = new Material(volumeMaterial);
-        mat.SetTexture("_FrontTex", faces[ViewDirection.Front].paintTexture);
-        mat.SetTexture("_BackTex", faces[ViewDirection.Back].paintTexture);
-        mat.SetTexture("_LeftTex", faces[ViewDirection.Left].paintTexture);
-        mat.SetTexture("_RightTex", faces[ViewDirection.Right].paintTexture);
-        mat.SetTexture("_TopTex", faces[ViewDirection.Top].paintTexture);
-        mat.SetTexture("_BottomTex", faces[ViewDirection.Bottom].paintTexture);
-        
-        volumeRoot.GetComponent<MeshRenderer>().sharedMaterial = mat;
-        volumeRoot.GetComponent<BoxCollider>().enabled = false;
+        Vector3 pos = grainSpawnPoint.position + Random.insideUnitSphere * 0.7f;
+        GameObject grain = Instantiate(grainPrefab, pos, Quaternion.identity);
+        activeGrains.Add(grain);
+        if (activeGrains.Count > 1000)
+        {
+            GameObject oldest = activeGrains[0];
+            activeGrains.RemoveAt(0);
+            if (oldest != null) Destroy(oldest);
+        }
     }
 
     void HandleInput()
     {
         if (Input.GetKeyDown(KeyCode.Space))
         {
-            isSculptMode = !isSculptMode;
+            isSimulationMode = !isSimulationMode;
             UpdateVisibility();
         }
 
-        if (!isSculptMode)
+        if (!isSimulationMode)
         {
             if (Input.GetKeyDown(KeyCode.W) || Input.GetKeyDown(KeyCode.UpArrow)) Navigate(Vector2.up);
             if (Input.GetKeyDown(KeyCode.S) || Input.GetKeyDown(KeyCode.DownArrow)) Navigate(Vector2.down);
@@ -168,10 +185,13 @@ public class CubeWorld : MonoBehaviour
         }
     }
 
-    void UpdateVisibility()
+    public void UpdateVisibility()
     {
-        shellRoot.SetActive(!isSculptMode);
-        volumeRoot.SetActive(isSculptMode);
+        if (!isSimulationMode)
+        {
+            foreach (var g in activeGrains) if (g != null) Destroy(g);
+            activeGrains.Clear();
+        }
     }
 
     void UpdateCamera()
@@ -179,24 +199,39 @@ public class CubeWorld : MonoBehaviour
         Camera cam = Camera.main;
         if (cam == null) return;
 
-        if (isSculptMode)
+        if (isSimulationMode)
         {
-            Vector3 targetPos = new Vector3(8, 8, -8);
+            // Position camera further back and higher for a cinematic view of the large structure
+            Vector3 targetPos = new Vector3(cubeDimensions.x * 0.8f, cubeDimensions.y * 0.8f, -cubeDimensions.z * 1.5f);
             cam.transform.position = Vector3.Lerp(cam.transform.position, transform.position + targetPos, Time.deltaTime * transitionSpeed);
             cam.transform.LookAt(transform.position);
         }
         else
         {
-            FaceData data = faces[currentView];
-            cam.transform.position = Vector3.Lerp(cam.transform.position, transform.position + data.cameraPosition, Time.deltaTime * transitionSpeed);
-            cam.transform.LookAt(transform.position, data.cameraUp);
+            FaceData data = GetActiveFace();
+            if (data != null) {
+                cam.transform.position = Vector3.Lerp(cam.transform.position, transform.position + data.cameraPosition, Time.deltaTime * transitionSpeed);
+                cam.transform.LookAt(transform.position, data.cameraUp);
+            }
         }
     }
 
-    public FaceData GetActiveFace() => faces[currentView];
-
-    void ClearRT(RenderTexture rt) {
-        RenderTexture.active = rt; GL.Clear(true, true, Color.black); RenderTexture.active = null;
+    public FaceData GetActiveFace() 
+    {
+        FaceData data = new FaceData { direction = currentView };
+        // Increase margin based on dimensions to ensure the whole face is visible
+        float margin = Mathf.Max(cubeDimensions.x, cubeDimensions.y, cubeDimensions.z) * 0.8f + 5f;
+        
+        switch (currentView)
+        {
+            case ViewDirection.Front: data.cameraPosition = new Vector3(0, 0, -cubeDimensions.z / 2f - margin); data.cameraUp = Vector3.up; break;
+            case ViewDirection.Back: data.cameraPosition = new Vector3(0, 0, cubeDimensions.z / 2f + margin); data.cameraUp = Vector3.up; break;
+            case ViewDirection.Left: data.cameraPosition = new Vector3(-cubeDimensions.x / 2f - margin, 0, 0); data.cameraUp = Vector3.up; break;
+            case ViewDirection.Right: data.cameraPosition = new Vector3(cubeDimensions.x / 2f + margin, 0, 0); data.cameraUp = Vector3.up; break;
+            case ViewDirection.Top: data.cameraPosition = new Vector3(0, cubeDimensions.y / 2f + margin, 0); data.cameraUp = Vector3.forward; break;
+            case ViewDirection.Bottom: data.cameraPosition = new Vector3(0, -cubeDimensions.y / 2f - margin, 0); data.cameraUp = Vector3.back; break;
+        }
+        return data;
     }
 
     void OnGUI()
@@ -205,7 +240,7 @@ public class CubeWorld : MonoBehaviour
         GUIStyle style = new GUIStyle(GUI.skin.label);
         style.fontSize = 20;
         style.fontStyle = FontStyle.Bold;
-        string mode = isSculptMode ? "SCULPTED VOLUME" : "PAINT MODE (" + currentView + ")";
+        string mode = isSimulationMode ? "PLAY MODE (Simulation)" : "EDIT MODE (Sculpting) - " + currentView;
         GUI.Label(new Rect(20, 20, 600, 30), $"MODE: {mode}", style);
         GUI.Label(new Rect(20, 50, 600, 30), "SPACE: Toggle | WASD/Arrows: Navigate | MOUSE: Draw", style);
     }

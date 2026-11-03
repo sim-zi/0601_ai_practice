@@ -1,0 +1,97 @@
+#pragma kernel UpdateWater
+#pragma kernel EmitWater
+
+RWTexture3D<float> _WaterBuffer; 
+RWTexture3D<float> _NextWaterBuffer;
+Texture2D<float> _FrontTex, _BackTex, _LeftTex, _RightTex, _TopTex, _BottomTex;
+
+SamplerState stateLinearClamp;
+
+float _DeltaTime;
+float3 _EmitPos;
+float _EmitRadius;
+int _Size;
+
+bool IsSolid(int3 id) {
+    if (any(id < 0) || any(id >= _Size)) return true;
+    
+    // Waterfall starts at the top - allow water to exist in the top layer
+    if (id.y >= _Size - 1) return false;
+
+    float3 uvw = (float3)id / (float)_Size;
+    
+    float front = _FrontTex.SampleLevel(stateLinearClamp, uvw.xy, 0).r;
+    float back = _BackTex.SampleLevel(stateLinearClamp, float2(1.0 - uvw.x, uvw.y), 0).r;
+    if (uvw.z > (1.0 - front)) return false;
+    if (uvw.z < back) return false;
+
+    float right = _RightTex.SampleLevel(stateLinearClamp, float2(1.0 - uvw.z, uvw.y), 0).g;
+    float left = _LeftTex.SampleLevel(stateLinearClamp, float2(uvw.z, uvw.y), 0).g; 
+    if (uvw.x > (1.0 - right)) return false;
+    if (uvw.x < left) return false;
+
+    float top = _TopTex.SampleLevel(stateLinearClamp, float2(uvw.x, 1.0 - uvw.z), 0).b;
+    float bottom = _BottomTex.SampleLevel(stateLinearClamp, uvw.xz, 0).b;
+    if (uvw.y > (1.0 - top)) return false;
+    if (uvw.y < bottom) return false;
+
+    return true;
+}
+
+[numthreads(8,8,8)]
+void UpdateWater (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Size || id.y >= (uint)_Size || id.z >= (uint)_Size) return;
+
+    if (IsSolid(id)) {
+        _NextWaterBuffer[id] = 0;
+        return;
+    }
+
+    float current = _WaterBuffer[id];
+    float next = current;
+
+    // Gravity: Pull from above
+    if (id.y < (uint)_Size - 1) {
+        float above = _WaterBuffer[id + uint3(0,1,0)];
+        if (above > 0.05) {
+            next += above * 0.5;
+        }
+    }
+
+    // Gravity: Give to below
+    if (id.y > 0) {
+        if (!IsSolid(id - uint3(0,1,0))) {
+            next -= current * 0.7; // Stronger downward pull
+        }
+    }
+
+    // Horizontal spread logic
+    float spread = current * 0.2;
+    if (id.x > 0 && !IsSolid(id - uint3(1,0,0))) next -= spread * 0.25;
+    if (id.x < (uint)_Size - 1 && !IsSolid(id + uint3(1,0,0))) next -= spread * 0.25;
+    if (id.z > 0 && !IsSolid(id - uint3(0,0,1))) next -= spread * 0.25;
+    if (id.z < (uint)_Size - 1 && !IsSolid(id + uint3(0,0,1))) next -= spread * 0.25;
+    
+    // Pick up from neighbors
+    if (id.x > 0) next += _WaterBuffer[id - uint3(1,0,0)] * 0.05;
+    if (id.x < (uint)_Size - 1) next += _WaterBuffer[id + uint3(1,0,0)] * 0.05;
+    if (id.z > 0) next += _WaterBuffer[id - uint3(0,0,1)] * 0.05;
+    if (id.z < (uint)_Size - 1) next += _WaterBuffer[id + uint3(0,0,1)] * 0.05;
+
+    // Evaporation / Dissipation (slower)
+    next *= 0.99;
+
+    _NextWaterBuffer[id] = saturate(next);
+}
+
+[numthreads(8,8,8)]
+void EmitWater (uint3 id : SV_DispatchThreadID)
+{
+    float3 center = _EmitPos * (float)_Size;
+    float d = distance((float3)id, center);
+    if (d < _EmitRadius * (float)_Size) {
+        // Force emission regardless of solid to start the flow
+        _WaterBuffer[id] = 1.0;
+    }
+}

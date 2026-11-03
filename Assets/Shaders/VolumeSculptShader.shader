@@ -9,9 +9,9 @@ Shader "Custom/VolumeSculptShader"
         _TopTex ("Top (XZ-B)", 2D) = "black" {}
         _BottomTex ("Bottom (XZ-B)", 2D) = "black" {}
         _CubeColor ("Solid Color", Color) = (0.1, 0.1, 0.1, 1)
-        _StepSize ("Step Size", Float) = 0.01
+        _StepSize ("Step Size", Float) = 0.02
     }
-    SubShader
+SubShader
     {
         Tags { "Queue"="Transparent" "RenderType"="Transparent" }
         LOD 100
@@ -44,7 +44,6 @@ Shader "Custom/VolumeSculptShader"
                 v2f o;
                 o.vertex = UnityObjectToClipPos(v.vertex);
                 o.localPos = v.vertex.xyz; // Range -0.5 to 0.5
-                // Calculate view direction in local space
                 float3 worldPos = mul(unity_ObjectToWorld, v.vertex).xyz;
                 float3 worldViewDir = normalize(worldPos - _WorldSpaceCameraPos);
                 o.viewDir = mul((float3x3)unity_WorldToObject, worldViewDir);
@@ -52,22 +51,21 @@ Shader "Custom/VolumeSculptShader"
             }
 
             bool IsSolid(float3 p) {
-                // Map p (-0.5 to 0.5) to uv (0 to 1)
                 float3 uvw = p + 0.5;
                 
-                // Front/Back (Z-axis carving via Red)
+                // Allow waterfall to show at the top
+                if (uvw.y >= 0.98) return false;
+
                 float front = tex2Dlod(_FrontTex, float4(uvw.xy, 0, 0)).r;
                 float back = tex2Dlod(_BackTex, float4(1-uvw.x, uvw.y, 0, 0)).r;
                 if (uvw.z > (1.0 - front)) return false;
                 if (uvw.z < back) return false;
 
-                // Left/Right (X-axis carving via Green)
                 float right = tex2Dlod(_RightTex, float4(1-uvw.z, uvw.y, 0, 0)).g;
                 float left = tex2Dlod(_LeftTex, float4(uvw.z, uvw.y, 0, 0)).g;
                 if (uvw.x > (1.0 - right)) return false;
                 if (uvw.x < left) return false;
 
-                // Top/Bottom (Y-axis carving via Blue)
                 float top = tex2Dlod(_TopTex, float4(uvw.x, 1-uvw.z, 0, 0)).b;
                 float bottom = tex2Dlod(_BottomTex, float4(uvw.x, uvw.z, 0, 0)).b;
                 if (uvw.y > (1.0 - top)) return false;
@@ -80,20 +78,26 @@ Shader "Custom/VolumeSculptShader"
                 float3 rayPos = i.localPos;
                 float3 rayDir = normalize(i.viewDir);
                 
-                // Raymarching inside the unit cube
-                for(int s = 0; s < 128; s++) {
-                    if (IsSolid(rayPos)) {
-                        // Very basic shading based on depth
+                float4 finalCol = float4(0,0,0,0);
+
+                for(int s = 0; s < 80; s++) {
+                    bool solid = IsSolid(rayPos);
+                    
+                    if (solid) {
                         float depth = distance(i.localPos, rayPos);
                         float light = 1.0 - depth;
-                        return fixed4(_CubeColor.rgb * light, 1.0);
+                        float4 solidCol = fixed4(_CubeColor.rgb * light, 1.0);
+                        finalCol.rgb = finalCol.rgb + (1.0 - finalCol.a) * solidCol.rgb;
+                        finalCol.a = 1.0;
+                        break;
                     }
+
                     rayPos += rayDir * _StepSize;
-                    // Exit if we leave the cube bounds
                     if (any(abs(rayPos) > 0.501)) break;
+                    if (finalCol.a >= 0.98) break;
                 }
-                
-                return fixed4(0, 0, 0, 0);
+
+                return finalCol;
             }
             ENDCG
         }
